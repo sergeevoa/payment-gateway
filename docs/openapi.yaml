@@ -1,0 +1,2138 @@
+openapi: 3.0.3
+info:
+  title: Payment Gateway API
+  description: |
+    API for accepting online payments, processing refunds, and managing transactions on behalf of merchants. 
+
+    ## Payment Modes
+
+    This version of the API supports **one-stage payments only**.
+    After the customer completes the payment form, the gateway
+    authorizes and confirms the payment automatically — the
+    merchant receives two simultaneous notifications:
+    `AUTHORIZED` and `CONFIRMED`.
+
+    Two-stage payments (manual confirmation via a separate
+    Confirm endpoint) are not supported in the current version.
+
+    ## Transport Security
+
+    All API requests must be made over HTTPS (TLS 1.2 or higher). The gateway rejects any request received over plain HTTP in production environments. HTTP is permitted only for local development against localhost.
+    Webhook notifications are also sent exclusively over HTTPS. Merchants must ensure their NotificationURL endpoints support TLS 1.2 or higher.
+
+    ## Webhook Notifications
+ 
+    The gateway sends POST requests to the merchant's `NotificationURL`
+    when payment status, card binding status, or fiscalization status
+    changes. The URL is either specified per-request in Init
+    (`NotificationURL` field) or configured globally in terminal
+    settings. If both are set, the per-request value takes precedence.
+ 
+    Every notification includes a `NotificationType` field for
+    routing: `Payment`, `AddCard`, or `Receipt`.
+
+    There are three notification types:
+      - **NotificationPayment** — sent when a payment status changes
+        (after Init, FinishAuthorize, Charge, or Cancel). For one-stage
+        payments, two notifications are sent simultaneously: `AUTHORIZED`
+        and `CONFIRMED`.
+      - **NotificationAddCard** — sent after a card binding attempt
+        via AttachCard.
+      - **NotificationReceipt** — sent after a fiscal receipt has been
+        processed by the online cash register (OFD).
+ 
+    See the corresponding schemas in `components/schemas` for the
+    full list of fields and examples.
+
+    ### Response Requirements
+ 
+    Upon successful processing, the merchant must return
+    `HTTP 200` with the body `OK` (uppercase, no tags or markup).
+ 
+    If the gateway does not receive `OK`, the notification is
+    considered undelivered. It will be retried once per hour
+    for 24 hours, then once per day for 30 days.
+ 
+    ### Token Verification
+ 
+    Every notification includes a `Token` field — a SHA-256
+    signature that the merchant must verify before processing:
+ 
+    1. Collect all notification parameters as key-value pairs,
+       excluding `Token` and any nested objects.
+    2. Add the pair `Password: <terminal password>`.
+    3. Sort alphabetically by key.
+    4. Concatenate all values into a single string.
+       For boolean values, use their string representation (`"true"` / `"false"`).
+    5. Compute SHA-256 of that string (UTF-8).
+    6. Compare the result with the received `Token`.
+   
+  version: 1.0.0
+  contact:
+    email: sergeevolegcob@gmail.com
+    name: Oleg Sergeev
+servers:
+  - url: 'https://{host}/v1'
+    description: Production server
+    variables:
+      host:
+        default: api.example.com
+        description: >
+          Replace with your actual gateway domain
+  - url: 'http://localhost:8080/v1'
+    description: Local development server
+security:
+  - BearerAuth: []
+tags:
+  - name: Payments
+    description: Initiating and confirming payments
+  - name: Customers
+    description: 'Registering, retrieving, and removing customers'
+  - name: Cards
+    description: 'Binding, retrieving, and removing customer cards'
+  - name: Receipts
+    description: Sending fiscal receipts to the online cash register
+paths:
+  /payments:
+    post:
+      tags:
+        - Payments
+      summary: Initialize a payment
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      description: |
+        Creates a new payment and returns a payment URL. The merchant must redirect the customer to this URL to complete the payment on the payment form.
+      operationId: init
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitRequest'
+      responses:
+        '201':
+          description: Payment initialized successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed — invalid TerminalId or Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests — rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      callbacks:
+        onPaymentStatus:
+          '{$request.body#/NotificationURL}':
+            post:
+              summary: Payment status notification
+              description: >
+                Sent when the payment status changes. The target URL
+                is taken from the NotificationURL field in the request.
+                If it was not provided, the URL from the terminal
+                settings is used instead.
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/NotificationPayment'
+              responses:
+                '200':
+                  description: |
+                    Merchant must return HTTP 200 with body `OK`
+                    (uppercase, no markup).
+
+  /payments/{paymentId}/finish-authorize:
+    post:
+      tags:
+        - Payments
+      summary: Confirm a payment
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: paymentId
+          in: path
+          required: true
+          description: Payment identifier returned by Init
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Confirms the payment by submitting encrypted card data or other payment credentials. This method is used when the merchant collects card data on their own payment form (requires PCI DSS certification).
+      operationId: finishAuthorize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinishAuthorizeRequest'
+      responses:
+        '200':
+          description: Payment confirmed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinishAuthorizeResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Payment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /payments/{paymentId}:
+    get:
+      tags:
+        - Payments
+      summary: Get payment status
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          description: Payment identifier returned by Init
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Returns the current status of a payment identified by PaymentId.
+      operationId: getState
+      responses:
+        '200':
+          description: Payment status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetStateResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Payment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /payments/{paymentId}/cancel:
+    post:
+      tags:
+        - Payments
+      summary: Cancel a payment
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: paymentId
+          in: path
+          required: true
+          description: Payment identifier returned by Init
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Cancels a payment or performs a refund. If the payment has been authorized but not yet confirmed, it cancels the hold. If the payment has already been confirmed, it initiates a refund. Partial refunds are supported by specifying an Amount less than the original.
+      operationId: cancel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '200':
+          description: Payment cancelled or refunded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Payment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /payments/{paymentId}/charge:
+    post:
+      tags:
+        - Payments
+      summary: Charge using saved credentials
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: paymentId
+          in: path
+          required: true
+          description: Payment identifier returned by Init
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Initiates a payment using previously saved card credentials (RebillId). The RebillId is obtained after a successful parent payment with Recurrent=Y. No customer interaction is required — the funds are charged automatically.
+      operationId: charge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+      responses:
+        '200':
+          description: Payment charged successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargeResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Payment or saved credentials not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /payments/{paymentId}/operations:
+    get:
+      tags:
+        - Payments
+      summary: Get operation details
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          description: Payment identifier returned by Init
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Returns detailed information about a confirmed operation, including amount, status, date, and authorization code.
+      operationId: getConfirmOperation
+      responses:
+        '200':
+          description: Operation details retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmOperationResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Operation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /orders/{orderId}/payments:
+    get:
+      tags:
+        - Payments
+      summary: Get order status
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: Order identifier
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Returns the status of an order identified by OrderId. Unlike GetState, this method uses the merchant's own order identifier and may return multiple payments associated with the same order.
+      operationId: checkOrder
+      responses:
+        '200':
+          description: Order status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckOrderResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /customers:
+    post:
+      tags:
+        - Customers
+      summary: Register a customer
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      description: |
+        Registers a new customer in the payment system. The customer is identified by a unique CustomerId provided by the merchant. This is a prerequisite for card binding and recurring payments.
+      operationId: addCustomer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddCustomerRequest'
+      responses:
+        '201':
+          description: Customer registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /customers/{customerId}:
+    get:
+      tags:
+        - Customers
+      summary: Get customer data
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          description: Customer identifier
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Returns stored data for a registered customer, including email, phone, and the list of bound card IDs.
+      operationId: getCustomer
+      responses:
+        '200':
+          description: Customer data retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags:
+        - Customers
+      summary: Remove a customer
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          description: Customer identifier
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Removes a registered customer and all associated bound cards from the payment system.
+      operationId: removeCustomer
+      responses:
+        '200':
+          description: Customer removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveCustomerResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /cards:
+    post:
+      tags:
+        - Cards
+      summary: Initialize card binding
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      description: |
+        Initiates the card binding process for a registered customer. Returns a PaymentURL where the customer enters card details. After the customer completes the form, the card is bound to the customer and can be used for recurring payments.
+      operationId: addCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddCardRequest'
+      responses:
+        '201':
+          description: Card binding initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddCardResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      callbacks:
+        onCardBindingResult:
+          '{https://merchant.example.com/notifications}':
+            post:
+              description: >
+                Sent after a card binding attempt. The target URL
+                is always taken from the terminal settings —
+                per-request override is not supported for this
+                operation.
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/NotificationAddCard'
+              responses:
+                '200':
+                  description: Return HTTP 200 with body `OK`
+    get:
+      tags:
+        - Cards
+      summary: Get customer card list
+      parameters:
+        - name: customerId
+          in: query
+          required: true
+          description: Filter cards by customer identifier
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Returns the list of all cards bound to a customer, including card IDs, masked card numbers (PANs), expiry dates, and card statuses.
+      operationId: getCardList
+      responses:
+        '200':
+          description: Card list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetCardListResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Customer not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'  
+
+  /cards/requests/{requestId}/attach:
+    post:
+      tags:
+        - Cards
+      summary: Attach a card
+      parameters:
+          - $ref: '#/components/parameters/IdempotencyKey'
+          - name: requestId
+            in: path
+            required: true
+            description: Card creation request identifier
+            schema:
+              type: string
+              maxLength: 36
+              example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Completes the card binding process by submitting encrypted card data. Used when the merchant collects card details on their own form (requires PCI DSS).
+      operationId: attachCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachCardRequest'
+      responses:
+        '200':
+          description: Card attached successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachCardResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Card binding request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cards/requests/{requestId}:
+    get:
+      tags:
+        - Cards
+      summary: Get card binding status
+      description: |
+        Returns the current status of a card binding request identified by RequestId.
+      operationId: getAddCardState
+      parameters:
+          - name: requestId
+            in: path
+            required: true
+            description: Card creation request identifier
+            schema:
+              type: string
+              maxLength: 36
+              example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      responses:
+        '200':
+          description: Card binding status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetAddCardStateResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Card binding request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cards/{cardId}:
+    delete:
+      tags:
+        - Cards
+      summary: Remove a bound card
+      parameters:
+        - name: cardId
+          in: path
+          required: true
+          description: Card identifier
+          schema:
+            type: string
+            maxLength: 36
+            example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+      description: |
+        Removes a previously bound card from the customer. The card can no longer be used for recurring payments.
+      operationId: removeCard
+      responses:
+        '200':
+          description: Card removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveCardResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Card not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  
+  /receipts:
+    post:
+      tags:
+        - Receipts
+      summary: Send a closing receipt
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      description: |
+        Sends a closing fiscal receipt to the online cash register. Used when the payment was made with a prepayment receipt and a closing receipt must be issued upon delivery of goods or services.
+      operationId: sendClosingReceipt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendClosingReceiptRequest'
+      responses:
+        '200':
+          description: Receipt sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Payment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Too many requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      callbacks:
+        onReceipt:
+          '{https://merchant.example.com/notifications}':
+            post:
+              description: >
+                 Sent to the NotificationURL configured in the
+                  terminal settings after the closing receipt
+                  has been processed by the OFD.
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/NotificationReceipt'
+              responses:
+                '200':
+                  description: Return HTTP 200 with body `OK`
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Unique key for idempotent requests (UUID v4 recommended).
+        If the gateway receives a repeated request with the same
+        key within 24 hours, it returns the original response
+        without re-executing the operation. Applies to POST
+        requests only.
+      schema:
+        type: string
+        format: uuid
+        example: 550e8400-e29b-41d4-a716-446655440000
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Secret API key issued per terminal. Pass it in the
+        Authorization header: `Authorization: Bearer <key>`.
+  schemas:
+    # ========================================================
+    # REQUEST SCHEMAS
+    # ========================================================
+    InitRequest:
+      type: object
+      required:
+        - Amount
+        - OrderId
+      properties:
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor currency units (e.g. kopecks). 100 = 1.00 RUB
+          example: 50000
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Unique order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Description:
+          type: string
+          maxLength: 140
+          description: Order description shown on the payment form
+          example: 'Payment for Order #001'
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier in the merchant's system. Required for card binding and recurring payments
+        Recurrent:
+          type: string
+          enum:
+            - 'Y'
+          description: Set to Y to save card credentials for future recurring payments
+        Language:
+          type: string
+          enum:
+            - ru
+            - en
+          default: en
+          description: Language of the payment form
+        NotificationURL:
+          type: string
+          format: uri
+          description: URL for receiving webhook notifications about payment status changes. If not provided, notifications are sent to the URL configured in the terminal settings.
+          example: 'https://myshop.example.com/webhooks/payments'
+        SuccessURL:
+          type: string
+          format: uri
+          description: URL to redirect the customer after successful payment
+          example: 'https://myshop.example.com/payment/success'
+        FailURL:
+          type: string
+          format: uri
+          description: URL to redirect the customer after failed payment
+          example: 'https://myshop.example.com/payment/fail'
+        RedirectDueDate:
+          type: string
+          format: date-time
+          description: 'Expiry date for the payment link. Must be in UTC (with Z suffix).'
+          example: '2025-12-31T20:59:59Z'
+        Receipt:
+          $ref: '#/components/schemas/Receipt'
+    FinishAuthorizeRequest:
+      type: object
+      required:
+        - CardData
+      properties:
+        SendEmail:
+          type: boolean
+          description: 'Sending notification to customer''s email: true — send notification, false — don''t send notification.'
+        InfoEmail:
+          type: string
+          description: Customer's email address. Required if SendEmail is true.
+        CardData:
+          type: string
+          description: 'Encrypted card data (PAN, ExpDate, CVV). Only for PCI DSS certified merchants'
+    AddCustomerRequest:
+      type: object
+      required:
+        - CustomerId
+      properties:
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Unique customer's identifier in the merchant's system
+        Email:
+          type: string
+          maxLength: 64
+          format: email
+          description: Customer's email address
+          example: customer@example.com
+        Phone:
+          type: string
+          maxLength: 64
+          description: Customer phone number in format +71234567890
+          example: '+79991234567'
+    AddCardRequest:
+      type: object
+      required:
+        - CustomerId
+      properties:
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        CheckType:
+          type: string
+          enum:
+            - "NO"
+            - "HOLD"
+            - "3DS"
+            - "3DSHOLD"
+          default: "NO"
+          description: >
+            Verification method for the card being bound.
+            HOLD — gateway authorizes a minimal amount and
+            reverses it automatically.
+            3DS — only 3D Secure authentication is performed.
+            3DSHOLD — both 3DS and hold verification.
+    AttachCardRequest:
+      type: object
+      required:
+        - CardData
+      properties:
+        CardData:
+          type: string
+          description: Encrypted card data
+    ChargeRequest:
+      type: object
+      required:
+        - RebillId
+      properties:
+        RebillId:
+          type: string
+          maxLength: 36
+          description: Saved card credentials identifier obtained from a successful parent payment with Recurrent=Y
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+        SendEmail:
+          type: boolean
+          description: Whether to send a payment receipt to the customer's email
+          default: false
+        InfoEmail:
+          type: string
+          format: email
+          description: Customer email for the receipt (required if SendEmail=true)
+          example: customer@example.com
+    CancelRequest:
+      type: object
+      properties:
+        Amount:
+          type: integer
+          format: int64
+          description: 'Refund amount in minor currency units. If omitted, full refund is performed'
+          example: 25000
+    SendClosingReceiptRequest:
+      type: object
+      required:
+        - PaymentId
+        - Receipt
+      properties:
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        Receipt:
+          $ref: '#/components/schemas/Receipt'
+    # ========================================================
+    # RESPONSE SCHEMAS
+    # ========================================================
+    InitResponse:
+      type: object
+      required:
+        - TerminalId
+        - Status
+        - PaymentId
+        - OrderId
+        - Amount
+        - PaymentURL
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        Status:
+          type: string
+          description: Payment status after initialization
+          example: NEW
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Unique payment identifier in the acquiring system
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor units
+          example: 50000
+        PaymentURL:
+          type: string
+          format: uri
+          description: URL of the payment form. Redirect the customer here to complete the payment
+          example: 'https://securepay.example.com/form/8d4f2e1a'
+    FinishAuthorizeResponse:
+      type: object
+      required:
+        - TerminalId
+        - Status
+        - OrderId
+        - Amount
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        Status:
+          type: string
+          maxLength: 20
+          description: |
+            Current payment status: CONFIRMED, REJECTED, 3DS_CHECKING
+          example: CONFIRMED
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor units
+          example: 50000
+        CardId:
+          type: string
+          maxLength: 36
+          description: Identifier of the card used for payment. Present only if payment was made with a bound card
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        RebillId:
+          type: string
+          maxLength: 36
+          description: Identifier for recurring payments. Present only if Recurrent=Y was passed in Init
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+        ACSUrl:
+          type: string
+          description: >
+            URL of the issuer's Access Control Server. Present only
+            when Status is 3DS_CHECKING. The merchant must redirect
+            the customer to this URL with a POST form containing
+            the PaReq and MD fields.
+        PaReq:
+          type: string
+          description: >
+            Payment Authentication Request — a Base64-encoded message
+            for the issuer's ACS. The merchant must include this value
+            in the POST form submitted to ACSUrl alongside MD.
+        MD:
+          type: string
+          description: >
+            Merchant Data — an opaque session identifier returned by
+            the gateway. The merchant must include this value in the
+            POST form submitted to ACSUrl alongside PaReq, so the
+            gateway can match the ACS response back to the original
+            payment.
+    ChargeResponse:
+      type: object
+      required:
+        - TerminalId
+        - Status
+        - PaymentId
+        - OrderId
+        - Amount
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        Status:
+          type: string
+          maxLength: 20
+          description: |
+            Current payment status: AUTHORIZED, CONFIRMED, REVERSED, REFUNDED, PARTIAL_REFUNDED, REJECTED
+          example: CONFIRMED
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor units
+          example: 50000
+        CardId:
+          type: string
+          maxLength: 36
+          description: Identifier of the card used for payment. Present only if payment was made with a bound card
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        RebillId:
+          type: string
+          maxLength: 36
+          description: Identifier for recurring payments. Present only if Recurrent=Y was passed in Init
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+    CancelResponse:
+      type: object
+      required:
+        - TerminalId
+        - PaymentId
+        - OrderId
+        - Status
+        - OriginalAmount
+        - NewAmount
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Status:
+          type: string
+          description: Payment status after cancellation
+          example: REVERSED
+        OriginalAmount:
+          type: integer
+          format: int64
+          description: Payment amount in minor units before cancellation
+          example: 50000
+        NewAmount:
+          type: integer
+          format: int64
+          description: Remaining payment amount in minor units after cancellation. 0 for full refund
+          example: 25000
+    CustomerResponse:
+      type: object
+      required:
+        - TerminalId
+        - CustomerId
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier in the merchant's system
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Email:
+          type: string
+          maxLength: 64
+          description: Customer email address
+          example: customer@example.com
+        Phone:
+          type: string
+          maxLength: 64
+          description: Customer phone number
+          example: '+79991234567'
+    RemoveCustomerResponse:
+      type: object
+      required:
+        - TerminalId
+        - CustomerId
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Identifier of the removed customer
+          example: customer-123
+    AddCardResponse:
+      type: object
+      required:
+        - PaymentId
+        - TerminalId
+        - CustomerId
+        - RequestId
+        - PaymentURL
+      properties:
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: >
+            Identifier of the verification transaction created
+            during card binding. Use with GetState to track
+            verification status.
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        RequestId:
+          type: string
+          maxLength: 36
+          description: Request identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        PaymentURL:
+          type: string
+          format: uri
+          description: URL of the card binding form
+          example: 'https://securepay.example.com/addcard/4e7bc5a0'
+    AttachCardResponse:
+      type: object
+      required:
+        - TerminalId
+        - CustomerId
+        - Status
+        - RequestId
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Status:
+          type: string
+          description: 'Card binding status: COMPLETED, REJECTED'
+          example: COMPLETED
+        RequestId:
+          type: string
+          maxLength: 36
+          description: Request identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        CardId:
+          type: string
+          maxLength: 36
+          description: Bound card identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        RebillId:
+          type: string
+          maxLength: 36
+          description: Identifier for recurring payments using this card. Present only if binding was successful
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+    GetAddCardStateResponse:
+      type: object
+      required:
+        - TerminalId
+        - RequestId
+        - Status
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        RequestId:
+          type: string
+          maxLength: 36
+          description: Request identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Status:
+          type: string
+          description: 'Binding status: NEW, COMPLETED, REJECTED'
+          example: COMPLETED
+        CardId:
+          type: string
+          maxLength: 36
+          description: Card identifier. Present only if binding is completed
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        RebillId:
+          type: string
+          maxLength: 36
+          description: Identifier for recurring payments using this card. Present only if binding was successful
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+    RemoveCardResponse:
+      type: object
+      required:
+        - TerminalId
+        - CustomerId
+        - CardId
+        - Pan
+        - Status
+        - CardType
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        CardId:
+          type: string
+          maxLength: 36
+          description: Identifier of the removed card
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Pan:
+          type: string
+          description: Masked card number
+          example: 430000******0777
+        Status:
+          type: string
+          enum:
+            - D
+          description: 'Card status: D = deleted'
+          example: D
+        CardType:
+          type: integer
+          description: 'Card type: 0 = debit, 1 = credit, 2 = corporate'
+          example: 0
+    GetCardListResponse:
+      type: object
+      required:
+        - TerminalId
+        - CustomerId
+        - Cards
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Cards:
+          type: array
+          description: List of cards bound to the customer
+          items:
+            $ref: '#/components/schemas/CardInfo'
+    CardInfo:
+      type: object
+      required:
+        - CardId
+        - Pan
+        - Status
+        - CardType
+      properties:
+        CardId:
+          type: string
+          maxLength: 36
+          description: Card identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Pan:
+          type: string
+          description: Masked card number
+          example: 430000******0777
+        ExpDate:
+          type: string
+          description: Card expiry date in format MMYY
+          example: '1230'
+        CardType:
+          type: integer
+          description: 'Card type: 0 = debit, 1 = credit, 2 = corporate'
+          example: 0
+        Status:
+          type: string
+          description: 'Card status: A (active), D (deleted).'
+          example: A
+        RebillId:
+          type: string
+          maxLength: 36
+          description: Identifier for recurring payments
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+    GetStateResponse:
+      type: object
+      required:
+        - TerminalId
+        - Status
+        - PaymentId
+        - OrderId
+        - Amount
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        Status:
+          type: string
+          description: |
+            Payment status: NEW, AUTHORIZED, CONFIRMED, REVERSED, REFUNDED, PARTIAL_REFUNDED, REJECTED
+          example: CONFIRMED
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor units
+          example: 50000
+    CheckOrderResponse:
+      type: object
+      required:
+        - TerminalId
+        - OrderId
+        - Payments
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Payments:
+          type: array
+          description: List of all payments associated with the order
+          items:
+            $ref: '#/components/schemas/Payment'
+    ConfirmOperationResponse:
+      type: object
+      required:
+        - TerminalId
+        - PaymentId
+        - Status
+        - Amount
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        Status:
+          type: string
+          description: Operation status
+          example: CONFIRMED
+        Amount:
+          type: integer
+          format: int64
+          description: Operation amount in minor units
+          example: 50000
+        AuthCode:
+          type: string
+          description: Bank authorization code
+          example: 7F3A2B
+        AuthDate:
+          type: string
+          format: date-time
+          description: Date and time of the authorization. 
+          example: '2025-06-15T14:30:00+03:00'
+    # ========================================================
+    # SHARED / UTILITY SCHEMAS
+    # ========================================================
+    SuccessResponse:
+      type: object
+      required:
+        - Message
+      properties:
+        Message:
+          type: string
+          description: Confirmation message
+          example: OK
+    ErrorResponse:
+      type: object
+      required:
+        - ErrorCode
+        - Message
+      properties:
+        ErrorCode:
+          type: string
+          description: Machine-readable error code
+          example: INVALID_PARAMETER
+        Message:
+          type: string
+          description: Human-readable error message
+          example: OrderId must not be empty
+        Details:
+          type: string
+          description: Additional error details
+          example: 'Field: OrderId'
+    Payment:
+      type: object
+      required:
+        - PaymentId
+        - Status
+        - Amount
+      properties:
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier in the acquiring system
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        Status:
+          type: string
+          description: >
+            Payment status: NEW, AUTHORIZED, CONFIRMED, REVERSED,
+            REFUNDED, PARTIAL_REFUNDED, REJECTED
+          example: CONFIRMED
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor currency units
+          example: 50000
+    Receipt:
+      type: object
+      description: >
+        At least one of Email or Phone must be provided.
+      required:
+        - Items
+        - Taxation
+      properties:
+        Email:
+          type: string
+          format: email
+          description: Customer email for the receipt
+          example: customer@example.com
+        Phone:
+          type: string
+          description: Customer phone for the receipt
+          example: '+79991234567'
+        Taxation:
+          type: string
+          enum:
+            - osn
+            - usn_income
+            - usn_income_outcome
+            - envd
+            - esn
+            - patent
+          description: Taxation system
+          example: osn
+        Items:
+          type: array
+          description: List of receipt items (max 100)
+          items:
+            $ref: '#/components/schemas/ReceiptItem'
+    ReceiptItem:
+      type: object
+      required:
+        - Name
+        - Price
+        - Quantity
+        - Amount
+        - Tax
+      properties:
+        Name:
+          type: string
+          maxLength: 128
+          description: Item name
+          example: Premium Subscription (1 month)
+        Price:
+          type: integer
+          format: int64
+          description: Unit price in minor currency units
+          example: 50000
+        Quantity:
+          type: number
+          description: 'Quantity (max 8 digits, 3 decimal places)'
+          example: 1
+        Amount:
+          type: integer
+          format: int64
+          description: Total item cost (Price × Quantity)
+          example: 50000
+        Tax:
+          type: string
+          enum:
+            - none
+            - vat0
+            - vat10
+            - vat20
+            - vat110
+            - vat120
+            - vat122
+          description: VAT rate
+          example: vat20
+        PaymentMethod:
+          type: string
+          enum:
+            - full_prepayment
+            - prepayment
+            - advance
+            - full_payment
+            - partial_payment
+            - credit
+            - credit_payment
+          default: full_payment
+          description: Payment method type
+        PaymentObject:
+          type: string
+          enum:
+            - commodity
+            - excise
+            - job
+            - service
+            - payment
+            - another
+          default: commodity
+          description: Payment object type
+    # ========================================================
+    # WEBHOOK SCHEMAS
+    # ========================================================
+    NotificationPayment:
+      type: object
+      description: >
+        Webhook body sent to the merchant's NotificationURL
+        when a payment status changes.
+      required:
+        - TerminalId
+        - OrderId
+        - Success
+        - Status
+        - PaymentId
+        - ErrorCode
+        - Amount
+        - NotificationType
+        - Token
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Success:
+          type: boolean
+          description: true if the operation was successful
+          example: true
+        Status:
+          type: string
+          description: >
+            Payment status: AUTHORIZED, CONFIRMED, REVERSED,
+            REFUNDED, PARTIAL_REFUNDED, REJECTED
+          example: CONFIRMED
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier in the gateway
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        ErrorCode:
+          type: string
+          description: Error code. "0" means no error
+          example: "0"
+        Amount:
+          type: integer
+          format: int64
+          description: Payment amount in minor currency units
+          example: 50000
+        CardId:
+          type: string
+          maxLength: 36
+          description: Bound card identifier (if applicable)
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Pan:
+          type: string
+          description: Masked card number
+          example: "430000******0777"
+        ExpDate:
+          type: string
+          description: Card expiry date in MMYY format
+          example: "1230"
+        RebillId:
+          type: string
+          maxLength: 36
+          description: >
+            Recurring payment identifier. Present only if
+            Recurrent=Y was passed in Init
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+        NotificationType:
+          type: string
+          enum:
+            - Payment
+          description: Always "Payment"
+        Token:
+          type: string
+          description: Notification signature (SHA-256)
+    NotificationAddCard:
+      type: object
+      description: >
+        Webhook body sent to the merchant's NotificationURL
+        after a card binding attempt via AttachCard.
+      required:
+        - TerminalId
+        - CustomerId
+        - RequestId
+        - Success
+        - Status
+        - PaymentId
+        - ErrorCode
+        - NotificationType
+        - Token
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        CustomerId:
+          type: string
+          maxLength: 36
+          description: Customer identifier in the merchant's system
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        RequestId:
+          type: string
+          maxLength: 36
+          description: Card binding request identifier
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Success:
+          type: boolean
+          description: true if the card was bound successfully
+          example: true
+        Status:
+          type: string
+          description: "Binding status: COMPLETED, REJECTED"
+          example: COMPLETED
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Identifier of the binding session
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        ErrorCode:
+          type: string
+          description: Error code. "0" means no error
+          example: "0"
+        CardId:
+          type: string
+          maxLength: 36
+          description: Bound card identifier (if successful)
+          example: 019314f7-0e5a-7c43-bf64-7d0a5e3f2b8c
+        Pan:
+          type: string
+          description: Masked card number
+          example: "430000******0777"
+        ExpDate:
+          type: string
+          description: Card expiry date in MMYY format
+          example: "1230"
+        RebillId:
+          type: string
+          maxLength: 36
+          description: >
+            Recurring payment identifier. Present only if
+            binding was successful and CheckType ≠ NO
+          example: 019314f7-2f8b-7d54-a075-9e1b6f4c3d9a
+        NotificationType:
+          type: string
+          enum:
+            - AddCard
+          description: Always "AddCard"
+        Token:
+          type: string
+          description: Notification signature (SHA-256)
+    NotificationReceipt:
+      type: object
+      description: >
+        Webhook body sent to the merchant's NotificationURL
+        after a fiscal receipt has been processed by the
+        online cash register (OFD).
+      required:
+        - TerminalId
+        - PaymentId
+        - OrderId
+        - Success
+        - ErrorCode
+        - Status
+        - NotificationType
+        - Token
+      properties:
+        TerminalId:
+          type: string
+          maxLength: 20
+          description: Terminal identifier
+          example: a1b2c3d4e5f6
+        PaymentId:
+          type: string
+          maxLength: 36
+          description: Payment identifier
+          example: 019314f6-a3c2-7b81-9d42-6f8e3a1b0c5d
+        OrderId:
+          type: string
+          maxLength: 36
+          description: Unique order identifier in the merchant's system
+          example: 019314f6-b7d4-7e92-ae53-8c9f4d2e1a6b
+        Success:
+          type: boolean
+          description: true if fiscalization succeeded
+          example: true
+        ErrorCode:
+          type: string
+          description: Error code. "0" means no error
+          example: "0"
+        Status:
+          type: string
+          description: "DONE or FAIL"
+          example: DONE
+        FiscalNumber:
+          type: string
+          description: Fiscal document number
+          example: "12345"
+        FnNumber:
+          type: string
+          description: Fiscal storage serial number
+          example: "9999078900006811"
+        FiscalSign:
+          type: string
+          description: Fiscal signature
+          example: "2817747472"
+        OfdUrl:
+          type: string
+          format: uri
+          description: URL to view the receipt at the OFD
+          example: "https://ofd.example.com/receipt/12345"
+        ReceiptDate:
+          type: string
+          format: date-time
+          description: Receipt date and time
+          example: "2025-06-15T14:30:00+03:00"
+        NotificationType:
+          type: string
+          enum:
+            - Receipt
+          description: Always "Receipt"
+        Token:
+          type: string
+          description: Notification signature (SHA-256)
