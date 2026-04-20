@@ -14,47 +14,42 @@ Communicates with merchants exclusively via signed webhooks.
 
 ## Architecture
 
-High-level component diagram showing services, protocols, and data flows:
+The system is described through three complementary views. Each view answers 
+one specific question about the architecture.
+
+### Synchronous communication (REST + gRPC)
+
+Request-response paths triggered by merchant API calls.
+
 ```mermaid
-flowchart TB
-    %% External actors
+flowchart LR
     Merchant([Merchant Backend])
     Bank([Acquiring Bank])
     OFD([ОФД])
 
-    %% Internal services
-    subgraph Gateway_Cluster[" Payment Gateway "]
-        direction TB
-        GW[api-gateway<br/><i>Spring Cloud Gateway</i>]
+    subgraph PGW[" Payment Gateway "]
+        direction LR
+        GW[api-gateway]
 
         subgraph Core[" Core Services "]
             direction TB
-            MS[merchant-service<br/><i>Spring Boot</i>]
-            PS[payment-service<br/><i>Spring Boot</i>]
-            CUS[customer-service<br/><i>Spring Boot</i>]
-            CARD[card-service<br/><i>Spring Boot</i>]
-            REC[receipt-service<br/><i>Spring Boot</i>]
-            NS[notification-service<br/><i>Spring Boot</i>]
+            PS[payment-service]
+            CARD[card-service]
+            CUS[customer-service]
+            MS[merchant-service]
+            REC[receipt-service]
+            NS[notification-service]
         end
-
-        %% Infrastructure
-        PG[(PostgreSQL)]
-        RD[(Redis)]
-        KAFKA{{Kafka}}
-        MINIO[(MinIO)]
     end
 
-    %% External → Gateway
     Merchant -->|REST + HMAC| GW
 
-    %% Gateway → Core (sync, hot path)
     GW -->|gRPC| PS
     GW -->|gRPC| CARD
     GW -->|gRPC| CUS
     GW -->|gRPC| MS
     GW -->|gRPC| REC
 
-    %% Inter-service sync calls
     PS -->|gRPC| MS
     PS -->|gRPC| CUS
     PS -->|gRPC| CARD
@@ -62,53 +57,121 @@ flowchart TB
     CARD -->|gRPC| MS
     REC -->|gRPC| MS
 
-    %% Outbound to external systems
     PS -->|REST| Bank
     REC -->|REST| OFD
-    NS -->|REST + HMAC webhooks| Merchant
+    NS -->|REST + HMAC| Merchant
 
-    %% Persistence
-    MS --- PG
-    PS --- PG
-    CUS --- PG
-    CARD --- PG
-    REC --- PG
-    NS --- PG
-
-    %% Cache & shared state
-    GW -.->|rate limit, idempotency| RD
-    PS -.->|idempotency, locks| RD
-    CARD -.->|state cache| RD
-    MS -.->|config cache| RD
-
-    %% Async events via Kafka
-    PS -.->|outbox→publish| KAFKA
-    CARD -.->|outbox→publish| KAFKA
-    REC -.->|outbox→publish| KAFKA
-    KAFKA -.->|consume| NS
-    KAFKA -.->|consume| REC
-
-    %% Object storage
-    REC --- MINIO
-    NS --- MINIO
-
-    %% Styling
     classDef external fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
     classDef service fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#000
     classDef gateway fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#000
-    classDef datastore fill:#dcfce7,stroke:#166534,stroke-width:2px,color:#000
-    classDef broker fill:#fce7f3,stroke:#9f1239,stroke-width:2px,color:#000
 
     class Merchant,Bank,OFD external
-    class MS,PS,CUS,CARD,REC,NS service
+    class PS,CARD,CUS,MS,REC,NS service
     class GW gateway
-    class PG,RD,MINIO datastore
-    class KAFKA broker
 
-    %% Subgraph styling — transparent fill, thin border
-    style Gateway_Cluster fill:none,stroke:#666,stroke-width:1.5px,stroke-dasharray: 5 5
+    style PGW fill:none,stroke:#666,stroke-width:1.5px,stroke-dasharray: 5 5
     style Core fill:none,stroke:#999,stroke-width:1px,stroke-dasharray: 3 3
 ```
+
+- External API is REST with HMAC signatures — required for backward 
+  compatibility and merchant SDK ecosystem
+- **Synchronous** service-to-service calls use gRPC
+- External integrations (acquiring bank, ОФД) use REST per their public contracts
+
+### Event-driven communication (Kafka)
+
+Domain events emitted by core services are consumed asynchronously to trigger 
+webhooks, fiscal processing, and downstream workflows.
+
+```mermaid
+flowchart LR
+    PS[payment-service]
+    CARD[card-service]
+    REC[receipt-service]
+    NS[notification-service]
+    Merchant([Merchant Backend])
+
+    T1{{"payment.events"}}
+    T2{{"card.events"}}
+    T3{{"receipt.events"}}
+
+    PS -->|outbox| T1
+    CARD -->|outbox| T2
+    REC -->|outbox| T3
+
+    T1 --> NS
+    T1 --> REC
+    T2 --> NS
+    T3 --> NS
+
+    NS -->|REST + HMAC webhooks| Merchant
+
+    classDef service fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#000
+    classDef broker fill:#fce7f3,stroke:#9f1239,stroke-width:2px,color:#000
+    classDef external fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
+
+    class PS,CARD,REC,NS service
+    class T1,T2,T3 broker
+    class Merchant external
+```
+
+### Data & infrastructure
+
+Each service owns its PostgreSQL database — no shared schema, no cross-service 
+joins. Shared infrastructure is limited to Redis and MinIO.
+
+```mermaid
+flowchart LR
+    subgraph Services[" Services "]
+        direction TB
+        MS[merchant-service]
+        PS[payment-service]
+        CUS[customer-service]
+        CARD[card-service]
+        REC[receipt-service]
+        NS[notification-service]
+        GW[api-gateway]
+    end
+
+    MS_DB[(PG: merchant)]
+    PS_DB[(PG: payment)]
+    CUS_DB[(PG: customer)]
+    CARD_DB[(PG: card)]
+    REC_DB[(PG: receipt)]
+    NS_DB[(PG: notification)]
+
+    RD[(Redis)]
+    MINIO[(MinIO)]
+
+    MS --- MS_DB
+    PS --- PS_DB
+    CUS --- CUS_DB
+    CARD --- CARD_DB
+    REC --- REC_DB
+    NS --- NS_DB
+
+    GW -.-> RD
+    PS -.-> RD
+    CARD -.-> RD
+    MS -.-> RD
+
+    REC --- MINIO
+    NS --- MINIO
+
+    classDef service fill:#dbeafe,stroke:#1e40af,stroke-width:2px,color:#000
+    classDef gateway fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#000
+    classDef datastore fill:#dcfce7,stroke:#166534,stroke-width:2px,color:#000
+
+    class MS,PS,CUS,CARD,REC,NS service
+    class GW gateway
+    class MS_DB,PS_DB,CUS_DB,CARD_DB,REC_DB,NS_DB,RD,MINIO datastore
+
+    style Services fill:none,stroke:#999,stroke-width:1px,stroke-dasharray: 3 3
+```
+
+- **PostgreSQL per service** — strict database-per-service boundary
+- **Redis** — idempotency keys, rate limiting, config caching, distributed locks
+- **MinIO** — object storage for fiscal receipt PDFs and webhook delivery logs
 
 ### Services
 
