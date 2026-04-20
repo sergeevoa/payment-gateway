@@ -22,13 +22,13 @@ one specific question about the architecture.
 Request-response paths triggered by merchant API calls.
 
 ```mermaid
-flowchart LR
+flowchart TB
     Merchant([Merchant Backend])
     Bank([Acquiring Bank])
     OFD([ОФД])
 
     subgraph PGW[" Payment Gateway "]
-        direction LR
+        direction TB
         GW[api-gateway]
 
         subgraph Core[" Core Services "]
