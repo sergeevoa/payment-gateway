@@ -187,7 +187,7 @@ flowchart LR
 
 ## Tech Stack
 
-**Language & Framework:** Java 17, Spring Boot 3, Spring Cloud Gateway, Spring Data JPA, Spring Security  
+**Language & Framework:** Java 21, Spring Boot 3, Spring Cloud Gateway, Spring Data JPA, Spring Security  
 **Communication:** REST, gRPC, Kafka  
 **Storage:** PostgreSQL, Redis, MinIO  
 **Build & Test:** Gradle, JUnit 5, Mockito, Testcontainers  
